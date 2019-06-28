@@ -9,7 +9,6 @@ from collections import OrderedDict
 import numpy as np
 import xarray as xr
 
-
 from .constants import FeatureType
 
 LOGGER = logging.getLogger(__name__)
@@ -637,3 +636,7 @@ def eopatch_to_dataset(eopatch, remove_depth=True):
 
     return dataset
 
+
+def bgr_to_rgb(bgr):
+    """Converts Blue, Green, Red to Red, Green, Blue."""
+    return bgr[..., [2, 1, 0]]

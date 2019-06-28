@@ -3,6 +3,7 @@ The eodata module provides core objects for handling remotely sensing multi-temp
 """
 
 import os
+import sys
 import logging
 import pickle
 import gzip
@@ -10,6 +11,8 @@ import shutil
 import warnings
 import copy
 import datetime
+import pickletools
+
 import attr
 import dateutil.parser
 import numpy as np
@@ -22,9 +25,14 @@ import sentinelhub
 from .constants import FeatureType, FileFormat, OverwritePermission
 from .utilities import deep_eq, FeatureParser, eopatch_to_xarrays
 
+# pylint: disable=too-many-lines
 LOGGER = logging.getLogger(__name__)
 
 MAX_DATA_REPR_LEN = 100
+
+
+if sentinelhub.__version__ >= '2.5.0':
+    sys.modules['sentinelhub.common'] = sentinelhub.geometry
 
 
 @attr.s(repr=False, cmp=False, kw_only=True)
@@ -61,11 +69,15 @@ class EOPatch:
     bbox = attr.ib(default=None)
     timestamp = attr.ib(factory=list)
 
-    def __setattr__(self, key, value):
+    def __setattr__(self, key, value, feature_name=None):
         """Raises TypeError if feature type attributes are not of correct type.
 
         In case they are a dictionary they are cast to _FeatureDict class
         """
+        if feature_name is not None and FeatureType.has_value(key):
+            self[key][feature_name] = value
+            return
+
         if FeatureType.has_value(key) and not isinstance(value, _FileLoader):
             feature_type = FeatureType(key)
             value = self._parse_feature_type_value(feature_type, value)
@@ -96,37 +108,59 @@ class EOPatch:
         raise TypeError('Attribute {} requires value of type {} - '
                         'failed to parse given value'.format(feature_type, feature_type.type()))
 
-    def __getattribute__(self, key, load=True):
-        """ Handles lazy loading
+    def __getattribute__(self, key, load=True, feature_name=None):
+        """ Handles lazy loading and it can even provide a single feature from _FeatureDict
         """
         value = super().__getattribute__(key)
 
         if isinstance(value, _FileLoader) and load:
             value = value.load()
             setattr(self, key, value)
-            return getattr(self, key)
+            value = getattr(self, key)
+
+        if feature_name is not None and isinstance(value, _FeatureDict):
+            return value[feature_name]
 
         return value
 
     def __getitem__(self, feature_type):
-        """Provides features of requested feature type.
+        """ Provides features of requested feature type. It can also accept a tuple of (feature_type, feature_name)
 
         :param feature_type: Type of EOPatch feature
-        :type feature_type: FeatureType or str
+        :type feature_type: FeatureType or str or (FeatureType, str)
         :return: Dictionary of features
         """
-        return getattr(self, FeatureType(feature_type).value)
+        feature_name = None
+        if isinstance(feature_type, tuple):
+            self._check_tuple_key(feature_type)
+            feature_type, feature_name = feature_type
+
+        return self.__getattribute__(FeatureType(feature_type).value, feature_name=feature_name)
 
     def __setitem__(self, feature_type, value):
-        """Sets a new dictionary / list to the given FeatureType.
+        """Sets a new dictionary / list to the given FeatureType. As a key it can also accept a tuple of
+        (feature_type, feature_name)
 
         :param feature_type: Type of EOPatch feature
-        :type feature_type: FeatureType or str
+        :type feature_type: FeatureType or str or (FeatureType, str)
         :param value: New dictionary or list
         :type value: dict or list
         :return: Dictionary of features
         """
-        return setattr(self, FeatureType(feature_type).value, value)
+        feature_name = None
+        if isinstance(feature_type, tuple):
+            self._check_tuple_key(feature_type)
+            feature_type, feature_name = feature_type
+
+        return self.__setattr__(FeatureType(feature_type).value, value, feature_name=feature_name)
+
+    @staticmethod
+    def _check_tuple_key(key):
+        """ A helper function that checks a tuple, which should hold (feature_type, feature_name)
+        """
+        if len(key) != 2:
+            raise ValueError('Given element should be a feature_type or a tuple of (feature_type, feature_name),'
+                             'but {} found'.format(key))
 
     def __eq__(self, other):
         """True if FeatureType attributes, bbox, and timestamps of both EOPatches are equal by value."""
@@ -255,6 +289,30 @@ class EOPatch:
         """
         self._check_if_dict(feature_type)
         self[feature_type][feature_name] = value
+
+    def rename_feature(self, feature_type, feature_name, new_feature_name):
+        """Renames the feature ``feature_name`` to ``new_feature_name`` from dictionary of ``feature_type``.
+
+        :param feature_type: Enum of the attribute we're about to rename
+        :type feature_type: FeatureType
+        :param feature_name: Name of the feature of the attribute
+        :type feature_name: str
+        :param new_feature_name : New Name of the feature of the attribute
+        :type feature_name: str
+        """
+
+        self._check_if_dict(feature_type)
+        if feature_name != new_feature_name:
+            if feature_name in self[feature_type]:
+                LOGGER.debug("Renaming feature '%s' from attribute '%s' to '%s'",
+                             feature_name, feature_type.value, new_feature_name)
+                self[feature_type][new_feature_name] = self[feature_type][feature_name]
+                del self[feature_type][feature_name]
+            else:
+                raise BaseException("Feature {} from attribute {} does not exist!".format(
+                    feature_name, feature_type.value))
+        else:
+            LOGGER.debug("Feature '%s' was not renamed because new name is identical.", feature_name)
 
     @staticmethod
     def _check_if_dict(feature_type):
@@ -738,6 +796,40 @@ class EOPatch:
         """
         pass
 
+    def plot(self, feature, rgb=None, rgb_factor=3.5, vdims=None, timestamp_column='TIMESTAMP',
+             geometry_column='geometry', pixel=False, mask=None):
+        """ Plots eopatch features
+
+        :param feature: feature of eopatch
+        :type feature: (FeatureType, str)
+        :param rgb: indexes of bands to create rgb image from
+        :type rgb: [int, int, int]
+        :param rgb_factor: factor for rgb bands multiplication
+        :type rgb_factor: float
+        :param vdims: value dimension for vector data
+        :type vdims: str
+        :param timestamp_column: name of the timestamp column, valid for vector data
+        :type timestamp_column: str
+        :param geometry_column: name of the geometry column, valid for vector data
+        :type geometry_column: str
+        :param pixel: plot values through time for one pixel
+        :type pixel: bool
+        :param mask: where eopatch[FeatureType.MASK] == False, value = 0
+        :type mask: str
+        :return: plot
+        :rtype: holovies/bokeh
+        """
+        try:
+            from eolearn.visualization import EOPatchVisualization
+        except ImportError:
+            raise RuntimeError('Subpackage eo-learn-visualization has to be installed with an option [FULL] in order '
+                               'to use plot method')
+
+        vis = EOPatchVisualization(self, feature=feature, rgb=rgb, rgb_factor=rgb_factor, vdims=vdims,
+                                   timestamp_column=timestamp_column, geometry_column=geometry_column,
+                                   pixel=pixel, mask=mask)
+        return vis.plot()
+
 
 class _FeatureDict(dict):
     """A dictionary structure that holds features of certain feature type.
@@ -863,9 +955,38 @@ class _FileLoader:
         """
         return os.path.join(self.patch_path, self.filename)
 
+    @staticmethod
+    def _correctly_load_bbox(bbox, path, is_zipped=False):
+        """ Helper method for loading old version of pickled BBox object
+
+        :param bbox: BBox object which was incorrectly loaded with pickle
+        :type bbox: sentinelhub.BBox
+        :param path: Path to file where BBox object is stored
+        :type path: str
+        :param is_zipped: `True` if file is zipped and `False` otherwise
+        :type is_zipped: bool
+        :return: Correctly loaded BBox object
+        :rtype: sentinelhub.BBox
+        """
+        warnings.warn("Bounding box of your EOPatch is saved in old format which in the future won't be supported "
+                      "anymore. Please save bounding box again, you can overwrite the existing one", DeprecationWarning,
+                      stacklevel=4)
+
+        with gzip.open(path) if is_zipped else open(path, 'rb') as pickle_file:
+            crs_cnt = -1
+            for _, arg, _ in pickletools.genops(pickle_file):
+                if arg == 'sentinelhub.constants CRS':
+                    crs_cnt = 2
+                if crs_cnt == 0:
+                    return sentinelhub.BBox(tuple(bbox), sentinelhub.CRS(arg))
+                crs_cnt -= 1
+
+        raise ValueError('Failed to correctly load BBox object, try downgrading sentinelhub package to <=2.4.7')
+
     def load(self):
         """ Method which loads data from the file
         """
+        # pylint: disable=too-many-return-statements
         if not os.path.isdir(self.patch_path):
             raise OSError('EOPatch does not exist in path {} anymore'.format(self.patch_path))
 
@@ -980,6 +1101,7 @@ class _FileSaver:
 
             if self.file_format is FileFormat.NPY:
                 np.save(outfile, data)
+<<<<<<< HEAD
                 # save coordinates
 
                 coordinates = {element: data.coords[element].values.tolist() for element in data.coords}
@@ -992,6 +1114,8 @@ class _FileSaver:
                 with open(dims_filename, 'w') as filehandle:
                     json.dump(dimensions, filehandle)
 
+=======
+>>>>>>> origin/develop
             elif self.file_format is FileFormat.PICKLE:
                 pickle.dump(data, outfile)
             else:
