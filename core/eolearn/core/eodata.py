@@ -1101,7 +1101,6 @@ class _FileSaver:
 
             if self.file_format is FileFormat.NPY:
                 np.save(outfile, data)
-<<<<<<< HEAD
                 # save coordinates
 
                 coordinates = {element: data.coords[element].values.tolist() for element in data.coords}
@@ -1114,8 +1113,6 @@ class _FileSaver:
                 with open(dims_filename, 'w') as filehandle:
                     json.dump(dimensions, filehandle)
 
-=======
->>>>>>> origin/develop
             elif self.file_format is FileFormat.PICKLE:
                 pickle.dump(data, outfile)
             else:
