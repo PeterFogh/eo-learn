@@ -30,6 +30,7 @@ class FeatureType(Enum):
      - TIMESTAMP: list of dates which are instances of datetime.datetime
     """
     # IMPORTANT: these feature names must exactly match those in EOPatch constructor
+    RASTER = 'raster'
     DATA = 'data'
     MASK = 'mask'
     SCALAR = 'scalar'
@@ -141,7 +142,7 @@ class FileFormat(Enum):
     PICKLE = 'pkl'
     NPY = 'npy'
     GZIP = 'gz'
-    JSON = 'json'
+    NETCDF = 'nc'
 
     def extension(self):
         """ Returns file extension of file format

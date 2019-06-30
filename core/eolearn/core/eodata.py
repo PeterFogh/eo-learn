@@ -19,11 +19,10 @@ import numpy as np
 import geopandas as gpd
 import xarray as xr
 import json
-
 import sentinelhub
 
 from .constants import FeatureType, FileFormat, OverwritePermission
-from .utilities import deep_eq, FeatureParser, eopatch_to_xarrays
+from .utilities import deep_eq, FeatureParser
 
 # pylint: disable=too-many-lines
 LOGGER = logging.getLogger(__name__)
@@ -55,6 +54,7 @@ class EOPatch:
     Currently the EOPatch object doesn't enforce that the length of timestamp be equal to n_times dimensions of numpy
     arrays in other attributes.
     """
+    raster = attr.ib(factory=xr.Dataset)
     data = attr.ib(factory=dict)
     mask = attr.ib(factory=dict)
     scalar = attr.ib(factory=dict)
@@ -93,6 +93,10 @@ class EOPatch:
         """
         if feature_type.has_dict() and isinstance(value, dict):
             return value if isinstance(value, _FeatureDict) else _FeatureDict(value, feature_type)
+
+        if feature_type is FeatureType.RASTER:
+            if value is None or isinstance(value, xr.Dataset):
+                return value
 
         if feature_type is FeatureType.BBOX:
             if value is None or isinstance(value, sentinelhub.BBox):
@@ -560,12 +564,17 @@ class EOPatch:
         for feature_type, feature_name in FeatureParser(features)(self):
             if not self[feature_type]:
                 continue
-            if not feature_type.is_meta() or feature_type not in saved_feature_types:
+            if feature_type is FeatureType.RASTER:
+                save_file_list.append(_FileSaver(
+                    path, tmp_path, feature_type, 'RASTER', FileFormat.NETCDF,
+                    compress_level))
+            elif not feature_type.is_meta() or feature_type not in saved_feature_types:
                 save_file_list.append(_FileSaver(path, tmp_path, feature_type,
                                                  None if feature_type.is_meta() else feature_name,
                                                  file_format if feature_type.contains_ndarrays() else FileFormat.PICKLE,
                                                  compress_level))
             saved_feature_types.add(feature_type)
+
         return save_file_list
 
     @staticmethod
@@ -666,7 +675,9 @@ class EOPatch:
                 continue
 
             content = entire_content[feature_type_str]
-            if isinstance(content, _FileLoader) or (isinstance(content, dict) and feature_name is ...):
+            if feature_type is FeatureType.RASTER:
+                requested_content[feature_type_str] = content['RASTER']
+            elif isinstance(content, _FileLoader) or (isinstance(content, dict) and feature_name is ...):
                 requested_content[feature_type_str] = content
             else:
                 if feature_type_str not in requested_content:
@@ -681,7 +692,7 @@ class EOPatch:
                     for feature_name, loader in content.items():
                         content[feature_name] = loader.load()
 
-        return eopatch_to_xarrays(EOPatch(**requested_content))
+        return EOPatch(**requested_content)
 
     @staticmethod
     def _get_eopatch_content(path, mmap=False):
@@ -712,8 +723,6 @@ class EOPatch:
                     eopatch_content[feature_type_name] = {}
 
                 for feature in os.listdir(feature_type_path):
-                    if os.path.splitext(feature)[1] == '.json':
-                        continue
                     feature_path = os.path.join(feature_type_path, feature)
                     if os.path.isdir(feature_path):
                         warnings.warn(
@@ -788,13 +797,6 @@ class EOPatch:
         self.timestamp = good_timestamps
         return remove_from_patch
 
-    def convert_to_xarray(self):
-        """
-        Convert data in eopatch from numpy arrays or xarrays with dummy dimensions/coordinates to xarrays.
-        It gets dimensions from FeatureType and coordinates from bbox and timestamps.
-        :return:
-        """
-        pass
 
     def plot(self, feature, rgb=None, rgb_factor=3.5, vdims=None, timestamp_column='TIMESTAMP',
              geometry_column='geometry', pixel=False, mask=None):
@@ -884,8 +886,8 @@ class _FeatureDict(dict):
             return value
 
         if self.ndim:
-            if not isinstance(value, (xr.DataArray, np.ndarray)):
-                raise ValueError('{} feature has to be a xarray DataArray'.format(self.feature_type))
+            if not isinstance(value, np.ndarray):
+                raise ValueError('{} feature has to be a numpy array'.format(self.feature_type))
             if value.ndim != self.ndim:
                 raise ValueError('Numpy array of {} feature has to have {} '
                                  'dimension{}'.format(self.feature_type, self.ndim, 's' if self.ndim > 1 else ''))
@@ -996,37 +998,23 @@ class _FileLoader:
 
         file_formats = FileFormat.split_by_extensions(path)[1:]
 
+        if file_formats[-1] is FileFormat.NETCDF:
+            # NOTE use pickle as long _FileSaver.save() do not support NetCDF files
+            with open(path, "rb") as infile:
+                return pickle.load(infile)
+
         if not file_formats or file_formats[-1] is FileFormat.PICKLE:
             with open(path, "rb") as infile:
                 return pickle.load(infile)
 
-        if file_formats[-1] is FileFormat.GZIP or file_formats[-1] is FileFormat.NPY:
-
-            dims_path = os.path.splitext(path)[0]+'-dims.json'
-            try:
-                with open(dims_path) as f:
-                    dims = json.load(f)
-            except FileNotFoundError:
-                dims = None
-
-            coords_path = os.path.splitext(path)[0]+'-coords.json'
-            try:
-                with open(coords_path) as f:
-                    coords = json.load(f)
-            except FileNotFoundError:
-                coords = None
-
         if file_formats[-1] is FileFormat.NPY:
             if self.mmap:
-                values = np.load(path, mmap_mode='r')
-            else:
-                values = np.load(path)
-            return xr.DataArray(data=values, dims=dims, coords=coords)
+                return np.load(path, mmap_mode='r')
+            return np.load(path)
 
         if file_formats[-1] is FileFormat.GZIP:
             if file_formats[-2] is FileFormat.NPY:
-                values = np.load(gzip.open(path))
-                return xr.DataArray(data=values, dims=dims, coords=coords)
+                return np.load(gzip.open(path))
 
             if len(file_formats) == 1 or file_formats[-2] is FileFormat.PICKLE:
                 return pickle.load(gzip.open(path))
@@ -1086,7 +1074,10 @@ class _FileSaver:
             if self.feature_type is FeatureType.BBOX:
                 data = tuple(data) + (int(data.crs.value),)
         else:
-            data = eopatch[self.feature_type][self.feature_name]
+            if self.feature_type is FeatureType.RASTER:
+                data = eopatch[self.feature_type]
+            else:
+                data = eopatch[self.feature_type][self.feature_name]
 
         file_dir = os.path.dirname(filename)
         os.makedirs(file_dir, exist_ok=True)
@@ -1098,20 +1089,21 @@ class _FileSaver:
 
         with file_handle as outfile:
             LOGGER.debug("Saving (%s, %s) to %s", str(self.feature_type), str(self.feature_name), filename)
+            
+            if self.file_format is FileFormat.NETCDF:
+                print(filename, type(filename))
+                netCDF_encoding_dict = {
+                    var: {'zlib': True, 'fletcher32': True}
+                    for var in [*data.data_vars.keys(), *data.coords.keys()]}
+                # NOTE: saving to NETCDF4 work when using `conda install xarray netcdf4`,
+                # but it do not work when using `pip install xarray h5py netcdf4`
+                #data.to_netcdf(
+                #    filename, format='NETCDF4',
+                #    engine='netcdf4', encoding=netCDF_encoding_dict, compute=True)
+                pickle.dump(data, outfile)
 
-            if self.file_format is FileFormat.NPY:
+            elif self.file_format is FileFormat.NPY:
                 np.save(outfile, data)
-                # save coordinates
-
-                coordinates = {element: data.coords[element].values.tolist() for element in data.coords}
-                coords_filename = os.path.splitext(filename)[0] + '-coords.json'
-                with open(coords_filename, 'w') as filehandle:
-                    json.dump(coordinates, filehandle)
-
-                dimensions = data.dims
-                dims_filename = os.path.splitext(filename)[0] + '-dims.json'
-                with open(dims_filename, 'w') as filehandle:
-                    json.dump(dimensions, filehandle)
 
             elif self.file_format is FileFormat.PICKLE:
                 pickle.dump(data, outfile)

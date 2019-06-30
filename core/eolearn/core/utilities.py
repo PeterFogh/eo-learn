@@ -111,6 +111,7 @@ class FeatureParser:
         :rtype: collections.OrderedDict(FeatureType: collections.OrderedDict(str: str or Ellipsis) or Ellipsis)
         :raises: ValueError
         """
+
         if isinstance(features, dict):
             return FeatureParser._parse_dict(features, new_names)
 
@@ -183,7 +184,7 @@ class FeatureParser:
             feature_type = None
             name_idx = 0
 
-        if feature_type and not feature_type.has_dict():
+        if feature_type and not feature_type.has_dict() and feature_type is not FeatureType.RASTER:
             return OrderedDict([(feature_type, ...)])
         return OrderedDict([(feature_type, FeatureParser._parse_names_tuple(features[name_idx:], new_names))])
 
@@ -595,46 +596,6 @@ def array_to_dataframe(eopatch, feature_type, feature_name):
                              name=feature_name.replace('-', '_'))
 
     return dataframe
-
-
-def eopatch_to_xarrays(eopatch):
-    """
-    Converts eopatch with numpy arrays to eopatch with DataArrays
-    :param eopatch:
-    :return:
-    """
-    for feature in eopatch.get_feature_list():
-        if not isinstance(feature, tuple):
-            continue
-        feature_type = feature[0]
-        feature_name = feature[1]
-        if feature_type not in (FeatureType.VECTOR, FeatureType.VECTOR_TIMELESS, FeatureType.META_INFO):
-            eopatch[feature_type][feature_name] = array_to_dataframe(eopatch, feature_type, feature_name)
-
-    return eopatch
-
-
-def eopatch_to_dataset(eopatch, remove_depth=True):
-    """
-    Converts eopatch to xarray Dataset
-    :param eopatch:
-    :return:
-    """
-    eopatch = eopatch_to_xarrays(eopatch)
-    dataset = xr.Dataset()
-    for feature in eopatch.get_feature_list():
-        if not isinstance(feature, tuple):
-            continue
-        feature_type = feature[0]
-        feature_name = feature[1]
-        if feature_type not in (FeatureType.VECTOR, FeatureType.VECTOR_TIMELESS, FeatureType.META_INFO):
-            dataframe = eopatch[feature_type][feature_name]
-            if remove_depth and dataframe.values.shape[-1] == 1:
-                dataframe = dataframe.squeeze()
-                dataframe = dataframe.drop(feature_name+'_dim')
-            dataset[feature_name] = dataframe
-
-    return dataset
 
 
 def bgr_to_rgb(bgr):
