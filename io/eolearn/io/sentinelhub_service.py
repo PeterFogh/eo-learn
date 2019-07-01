@@ -6,7 +6,6 @@ import logging
 import datetime as dt
 
 import numpy as np
-import xarray as xr
 from sentinelhub import WmsRequest, WcsRequest, MimeType, DataSource, CustomUrlParam, ServiceType
 
 from eolearn.core import EOPatch, EOTask, FeatureType, get_common_timestamps
@@ -142,15 +141,7 @@ class SentinelHubOGCInput(EOTask):
         if self.feature_type.is_discrete():
             data = data.astype(np.int32)
 
-        dimensions = get_dimensions(feature_type=self.feature_type, feature_name=self.feature_name)
-        coordinates = get_coordinates(feature_type=self.feature_type,
-                                      feature_name=self.feature_name,
-                                      bbox=self._get_parameter('bbox', eopatch),
-                                      data=data,
-                                      timestamps=eopatch.timestamp)
-        eopatch[self.feature_type][self.feature_name] = xr.DataArray(data=data,
-                                                                     dims=dimensions,
-                                                                     coords=coordinates)
+        eopatch[self.feature_type][self.feature_name] = data
 
         mask_feature_type, mask_feature_name = next(self.valid_data_mask_feature())
 
@@ -158,15 +149,7 @@ class SentinelHubOGCInput(EOTask):
         valid_data = (valid_mask == max_value).astype(np.bool).reshape(valid_mask.shape + (1,))
 
         if mask_feature_name not in eopatch[mask_feature_type]:
-            dimensions = get_dimensions(feature_type=self.feature_type, feature_name=self.feature_name)
-            coordinates = get_coordinates(feature_type=self.feature_type,
-                                          feature_name=self.feature_name,
-                                          bbox=self._get_parameter('bbox', eopatch),
-                                          data=valid_data,
-                                          timestamps=eopatch.timestamp)
-            eopatch[mask_feature_type][mask_feature_name] = xr.DataArray(data=valid_data,
-                                                                         dims=dimensions,
-                                                                         coords=coordinates)
+            eopatch[mask_feature_type][mask_feature_name] = valid_data
 
     def _add_meta_info(self, eopatch, request_params, service_type):
         """ Adds any missing metadata info to EOPatch """
@@ -233,8 +216,8 @@ class SentinelHubOGCInput(EOTask):
                 LOGGER.warning('Removed data for frame %s from EOPatch '
                                'due to unavailability of %s!', str(removed_frame), self.layer)
 
-        self._add_meta_info(eopatch, request_params, service_type)
         self._add_data(eopatch, np.asarray(images))
+        self._add_meta_info(eopatch, request_params, service_type)
 
         return eopatch
 
