@@ -130,27 +130,24 @@ class SentinelHubOGCInputXarray(EOTask):
 
     def _add_data(self, eopatch, data, dates, request_params):
         """ Adds downloaded data to EOPatch """
-        print(f'start data: {data.shape}')
         valid_mask = data[..., -1]
-        
         data = data[..., :-1]
 
-        # TODO fix hard-coding of band names from layer "BANDS_S2_L1C - use bands defines in custom-script
-        bands = ['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09', 'B10', 'B11', 'B12']
-        print(f'data(-valid_mask): {data.shape}')
+        # TODO fix hard-coding of channel names from layer "BANDS_S2_L1C - perhaps use channels defines in custom-script
+        channels = ['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09', 'B10', 'B11', 'B12']
         y_pixels = data.shape[1]
         x_pixels = data.shape[2]
         y_coords = np.linspace(request_params['bbox'].min_y, request_params['bbox'].max_y, y_pixels)
         x_coords = np.linspace(request_params['bbox'].min_y, request_params['bbox'].max_x, x_pixels)
 
-        eopatch[self.feature_type][self.feature_name] = xr.concat([
-            xr.DataArray(
-                image[np.newaxis, :, :, :], coords={
-                    'time': pd.DatetimeIndex([time]).floor('D'),
-                    'y_coords': y_coords, 'x_coords': x_coords,
-                    'channel': bands},
-                dims=['time', 'y_coords', 'x_coords', 'channel'])
-            for image, time in zip(data, dates)], dim='time')
+        eopatch.raster[self.feature_name] = xr.DataArray(
+            data, coords={
+                'time': pd.DatetimeIndex(dates).floor('D'),
+                'y_coord': y_coords, 'x_coord': x_coords,
+                'channel': channels},
+            dims=['time', 'y_coord', 'x_coord', 'channel'])
+        # TODO: Merge the valid_data mask into the data images as NaNs to simplify the output.
+        # TODO: add request attributes as dataarray attributes
 
         mask_feature_type, mask_feature_name = next(self.valid_data_mask_feature())
 
@@ -158,15 +155,11 @@ class SentinelHubOGCInputXarray(EOTask):
         valid_data = (valid_mask == max_value).astype(np.bool)
 
         if mask_feature_name not in eopatch[mask_feature_type]:
-            print(f'valid_data: {valid_data.shape}')
-            eopatch[mask_feature_type][mask_feature_name] = xr.concat([
-                xr.DataArray(
-                    mask[np.newaxis, :, :], coords={
-                        'time': pd.DatetimeIndex([time]).floor('D'),
-                        'y_coords': y_coords, 'x_coords': x_coords},
-                    dims=['time', 'y_coords', 'x_coords'])
-                for mask, time in zip(valid_data, dates)], dim='time')
-        # TODO: add request attributes as dataarray attributes
+            eopatch.raster[mask_feature_name] = xr.DataArray(
+                valid_data, coords={
+                    'time': pd.DatetimeIndex(dates).floor('D'),
+                    'y_coord': y_coords, 'x_coord': x_coords},  # TODO: name x and y coords with EPSG and resolution
+                dims=['time', 'y_coord', 'x_coord'])
 
     def _add_meta_info(self, eopatch, request_params, service_type):
         """ Adds any missing metadata info to EOPatch """
